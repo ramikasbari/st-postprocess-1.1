@@ -97,6 +97,62 @@ spreadsheet values are used directly as 0-based Python frame indices.
 Peak-systolic strain (the headline `GLS`/`GCS`) is the most negative value
 between **Q1 and MVO**; the end-systolic value is taken at **AVC**.
 
+## Two input paths
+
+This package supports two sources of myocardial motion:
+
+1. **ECHOPAC `.CSV` exports** (the repo's real data) — speckle tracking already
+   done; points handed in. Fully validated. *This is the primary path.*
+2. **DICOM cine images** (`gls_analysis.image_gls`) — pixels in, strain out, via
+   a segmentation model. This is a **scaffold**: the strain core is validated,
+   but the model + mask→contour heuristic that feed it are **not** — treat any
+   number from this path as a research baseline, not a clinical measurement.
+
+### Image (DICOM) path
+
+You bring the DICOM reader and the model; this package supplies the boundary
+interfaces and the validated strain core in between:
+
+```
+your DICOM reader ──▶ CineLoop ──▶ Segmenter ──▶ mask_to_endocardial_contour
+                                    (EchoNet)             │
+                                                          ▼
+                              contours ──▶ [validated strain core] ──▶ GLSResult
+```
+
+```python
+from gls_analysis import CineLoop, EchoNetSegmenter, analyze_cine
+
+# 1. Adapt YOUR DICOM reader's output into a CineLoop (see cine.py)
+cine = CineLoop(frames=frames, frame_rate=fps, view="A4C",
+                ed_frame=ed, es_frame=es)
+
+# 2. Plug in a per-frame LV segmenter (EchoNet-Dynamic weights, MIT license)
+seg = EchoNetSegmenter(weights_path="deeplabv3_resnet50.pt", device="cuda")
+
+# 3. Segment every frame -> wall contour -> strain (reuses the validated core)
+result = analyze_cine(cine, seg)
+print(result.gls_percent)   # single-plane A4C longitudinal strain
+```
+
+Any model satisfying the `Segmenter` protocol (`frame -> binary LV mask`) plugs
+in — EchoNet is just the reference adapter.
+
+**Honest limitations of the image path:**
+
+- **A4C-only ⇒ not true GLS.** EchoNet-Dynamic segments apical-4-chamber only, so
+  you get the **4-chamber longitudinal component**, not the 3-view (A4C+A2C+A3C)
+  clinical GLS. It is labelled `4CH` in the result for that reason.
+- **`mask_to_endocardial_contour` is a heuristic** (PCA long axis → apex/annulus
+  landmarks). Documented and testable, but needs tuning/validation on real masks.
+- **Single-vendor model.** EchoNet is single-center; expect drift on other
+  vendors. Cross-vendor robustness needs multi-vendor training data + validation.
+- **No clinical validation.** There is no Bland-Altman vs EchoPAC here; the
+  `EchoNetSegmenter` wrapper is written to EchoNet's API but not run in CI.
+
+Optional deps for this path only: `opencv-python` (mask→contour) and
+`torch`/`torchvision` (EchoNet). The CSV path needs neither.
+
 ## Layout
 
 ```
@@ -107,8 +163,12 @@ python/
     gls.py              # global + segmental GLS/GCS, phase handling
     quality.py          # evidence-based QC gates and reference ranges
     cli.py              # command-line entry point
+    cine.py             # CineLoop: the DICOM-reader seam (image path)
+    segmentation.py     # Segmenter protocol, EchoNet adapter, mask->contour
+    image_gls.py        # cine -> per-frame contours -> validated strain core
   tests/
-    test_gls.py         # runs against the real Data/ samples
+    test_gls.py         # CSV path, runs against the real Data/ samples
+    test_image_gls.py   # image glue, synthetic contours (numpy-only core)
   requirements.txt
 ```
 

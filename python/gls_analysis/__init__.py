@@ -21,6 +21,7 @@ The strain math is a faithful port of the toolkit's MATLAB ``getSTdataXY.m``
 on endocardial-length change.
 """
 
+from .cine import CineLoop
 from .echopac_reader import (
     ECG_EVENT_NAMES,
     STSequence,
@@ -30,7 +31,17 @@ from .echopac_reader import (
     read_registry,
 )
 from .gls import GLSResult, SegmentStrain, compute_gls
+from .image_gls import (
+    analyze_cine,
+    contours_to_sequence,
+    detect_ed_es_from_areas,
+)
 from .quality import QCReport, assess
+from .segmentation import (
+    EchoNetSegmenter,
+    Segmenter,
+    mask_to_endocardial_contour,
+)
 from .strain import (
     LocalStrainResult,
     compute_local_strain,
@@ -39,6 +50,7 @@ from .strain import (
 )
 
 __all__ = [
+    # CSV / ECHOPAC path
     "ECG_EVENT_NAMES",
     "STSequence",
     "SubjectEntry",
@@ -54,6 +66,14 @@ __all__ = [
     "SegmentStrain",
     "assess",
     "QCReport",
+    # Image (DICOM) path
+    "CineLoop",
+    "Segmenter",
+    "EchoNetSegmenter",
+    "mask_to_endocardial_contour",
+    "analyze_cine",
+    "contours_to_sequence",
+    "detect_ed_es_from_areas",
 ]
 
 __version__ = "1.0.0"
