@@ -47,6 +47,8 @@ class CineLoop:
         pixel_spacing: ``(row_mm, col_mm)`` physical spacing, or ``None``
             (strain is scale-invariant, so this is optional).
         view: Acoustic view label, e.g. ``"A4C"`` (EchoNet-Dynamic is A4C only).
+        topology: ``"open"`` for apical/longitudinal walls (GLS), ``"closed"``
+            for short-axis rings (GCS).
         ed_frame: End-diastole frame index, or ``None`` to auto-detect from the
             segmentation area curve.
         es_frame: End-systole frame index, or ``None`` to auto-detect.
@@ -61,6 +63,7 @@ class CineLoop:
     frame_rate: float
     pixel_spacing: Optional[Tuple[float, float]] = None
     view: str = "A4C"
+    topology: str = "open"  # "open" (longitudinal, apical) | "closed" (SAX ring)
     ed_frame: Optional[int] = None
     es_frame: Optional[int] = None
     ecg_events: Optional[List[int]] = None

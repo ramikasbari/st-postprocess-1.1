@@ -1,5 +1,11 @@
 """
-Image-based strain: cine loop -> per-frame contours -> validated strain core.
+Image-based strain: masks / cine loop -> per-frame contours -> validated core.
+
+Entry points, cheapest first:
+    * :func:`analyze_masks` / :func:`masks_to_sequence` — you already have
+      per-frame LV masks (e.g. from your own model); hand them straight in.
+    * :func:`analyze_cine` — you have a :class:`~gls_analysis.cine.CineLoop` and
+      a :class:`~gls_analysis.segmentation.Segmenter`; it segments then delegates.
 
 This is the "Route 2" (segment-every-frame) path. Per-frame endocardial
 contours are resampled to a common point count by arc length — which gives an
@@ -84,6 +90,121 @@ def detect_ed_es_from_areas(areas: np.ndarray) -> tuple[int, int]:
     return ed, es
 
 
+def _contours_from_masks(
+    masks: Sequence[np.ndarray], num_points: int
+) -> tuple[List[Optional[np.ndarray]], np.ndarray]:
+    """Extract an endocardial contour (or None) and the area of each mask."""
+    contours: List[Optional[np.ndarray]] = []
+    areas: List[float] = []
+    for mask in masks:
+        m = np.asarray(mask)
+        area = float((m > 0).sum())
+        areas.append(area)
+        contours.append(
+            mask_to_endocardial_contour(m, n_points=num_points) if area > 0 else None
+        )
+    return contours, np.asarray(areas)
+
+
+def _fill_contour_gaps(contours: List[Optional[np.ndarray]]) -> List[np.ndarray]:
+    """Replace any missing frame's contour with the previous valid one."""
+    valid = [c for c in contours if c is not None]
+    filled: List[np.ndarray] = []
+    last = valid[0]
+    for c in contours:
+        last = c if c is not None else last
+        filled.append(last)
+    return filled
+
+
+def masks_to_sequence(
+    masks: Sequence[np.ndarray],
+    frame_rate: float,
+    ed_frame: Optional[int] = None,
+    es_frame: Optional[int] = None,
+    topology: str = OPEN,
+    num_points: int = 100,
+    name: str = "cine",
+    view: Optional[str] = None,
+    min_valid_fraction: float = 0.8,
+) -> StrainSequence:
+    """Turn a sequence of per-frame LV masks into a :class:`StrainSequence`.
+
+    This is the direct hand-off for a program that already has segmentation
+    masks (e.g. from its own model) and just wants strain — no ``CineLoop`` or
+    ``Segmenter`` object required.
+
+    Args:
+        masks: One ``(H, W)`` binary LV blood-pool mask per frame.
+        frame_rate: Hz.
+        ed_frame: End-diastole frame (reference). Auto-detected from mask areas
+            (largest cavity) when ``None``.
+        es_frame: End-systole frame. Auto-detected (smallest cavity after ED)
+            when ``None``.
+        topology: ``"open"`` (longitudinal wall / GLS) or ``"closed"`` (ring / GCS).
+        num_points: Wall resampling density.
+        name: Sequence label.
+        view: Optional acquisition-view label for reporting.
+        min_valid_fraction: Minimum fraction of frames that must yield a usable
+            contour, else :class:`RuntimeError`.
+
+    Returns:
+        A :class:`StrainSequence` ready for :func:`compute_gls`.
+
+    Raises:
+        ValueError: If fewer than 3 masks are given.
+        RuntimeError: If too few masks produce a usable contour.
+        ImportError: If OpenCV (needed for mask→contour) is not installed.
+    """
+    masks = list(masks)
+    n = len(masks)
+    if n < 3:
+        raise ValueError("need at least 3 masks")
+
+    contours, areas = _contours_from_masks(masks, num_points)
+    n_valid = sum(c is not None for c in contours)
+    if n_valid < min_valid_fraction * n:
+        raise RuntimeError(
+            f"only {n_valid}/{n} masks produced a usable contour; "
+            "segmentation likely failed"
+        )
+
+    filled = _fill_contour_gaps(contours)
+
+    if ed_frame is None or es_frame is None:
+        auto_ed, auto_es = detect_ed_es_from_areas(areas)
+        ed_frame = auto_ed if ed_frame is None else ed_frame
+        es_frame = auto_es if es_frame is None else es_frame
+
+    return contours_to_sequence(
+        filled, frame_rate, ed_frame, es_frame,
+        name=name, num_points=num_points, topology=topology, view=view,
+    )
+
+
+def analyze_masks(
+    masks: Sequence[np.ndarray],
+    frame_rate: float,
+    ed_frame: Optional[int] = None,
+    es_frame: Optional[int] = None,
+    topology: str = OPEN,
+    num_points: int = 100,
+    name: str = "cine",
+    view: Optional[str] = None,
+) -> GLSResult:
+    """Masks -> strain in one call (the ramireport hand-off).
+
+    Equivalent to ``compute_gls(masks_to_sequence(...), correct_drift=False)``.
+    Drift correction is off because image contours have no guaranteed cyclic
+    closure. See :func:`masks_to_sequence` for arguments.
+    """
+    seq = masks_to_sequence(
+        masks, frame_rate, ed_frame, es_frame,
+        topology=topology, num_points=num_points, name=name, view=view,
+    )
+    return compute_gls(seq, n_segments=6, correct_drift=False)
+
+
 def analyze_cine(
     cine: CineLoop,
     segmenter: Segmenter,
@@ -104,40 +225,15 @@ def analyze_cine(
         RuntimeError: If too few frames yield a usable contour.
     """
     frames = cine.grayscale()
-    contours: List[Optional[np.ndarray]] = []
-    areas: List[float] = []
-    for t in range(cine.num_frames):
-        mask = segmenter.segment(frames[t])
-        area = float(np.asarray(mask).sum())
-        areas.append(area)
-        contour = mask_to_endocardial_contour(mask, n_points=num_points) if area > 0 else None
-        contours.append(contour)
-
-    valid = [c for c in contours if c is not None]
-    if len(valid) < 0.8 * cine.num_frames:
-        raise RuntimeError(
-            f"only {len(valid)}/{cine.num_frames} frames produced a usable "
-            "contour; segmentation likely failed"
-        )
-
-    # Fill any gaps by repeating the previous valid contour (rare).
-    filled: List[np.ndarray] = []
-    last = valid[0]
-    for c in contours:
-        last = c if c is not None else last
-        filled.append(last)
+    masks = [segmenter.segment(frames[t]) for t in range(cine.num_frames)]
 
     if cine.ecg_events is not None:
         ed, es = cine.ecg_events[0], cine.ecg_events[3]
-    elif cine.ed_frame is not None and cine.es_frame is not None:
-        ed, es = cine.ed_frame, cine.es_frame
     else:
-        ed, es = detect_ed_es_from_areas(np.asarray(areas))
+        ed, es = cine.ed_frame, cine.es_frame  # may be None -> auto-detected
 
-    seq = contours_to_sequence(
-        filled, cine.frame_rate, ed, es,
-        name=cine.patient_id or cine.view, num_points=num_points,
-        view=cine.view,
+    return analyze_masks(
+        masks, cine.frame_rate, ed_frame=ed, es_frame=es,
+        topology=cine.topology, num_points=num_points,
+        name=cine.patient_id or cine.view, view=cine.view,
     )
-    # No drift correction: image contours have no guaranteed cyclic closure.
-    return compute_gls(seq, n_segments=6, correct_drift=False)

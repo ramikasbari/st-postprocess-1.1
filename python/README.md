@@ -143,6 +143,28 @@ print(result.gls_percent)   # single-plane A4C longitudinal strain
 Any model satisfying the `Segmenter` protocol (`frame -> binary LV mask`) plugs
 in — EchoNet is just the reference adapter.
 
+### Direct masks hand-off (for embedding)
+
+If your program already has per-frame LV masks (from its own model), skip
+`CineLoop`/`Segmenter` entirely and hand the masks straight in:
+
+```python
+from gls_analysis import analyze_masks
+
+# masks: list of (H, W) binary LV masks, one per frame
+result = analyze_masks(
+    masks, frame_rate=fps,
+    ed_frame=None, es_frame=None,   # None -> auto-detected from cavity area
+    topology="open",                # "open" = GLS, "closed" = SAX/GCS
+    view="A4C",
+)
+print(result.metric_name, result.gls_percent)
+```
+
+`masks_to_sequence(...)` is the same thing stopping at a `StrainSequence`, if you
+want to inspect or post-process before computing strain. Needs OpenCV (for the
+mask→contour step); everything after it is the validated NumPy core.
+
 **Honest limitations of the image path:**
 
 - **A4C-only ⇒ not true GLS.** EchoNet-Dynamic segments apical-4-chamber only, so

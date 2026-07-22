@@ -52,8 +52,10 @@ from .echopac_reader import (
 )
 from .image_gls import (
     analyze_cine,
+    analyze_masks,
     contours_to_sequence,
     detect_ed_es_from_areas,
+    masks_to_sequence,
 )
 from .segmentation import (
     EchoNetSegmenter,
@@ -87,6 +89,8 @@ __all__ = [
     "Segmenter",
     "EchoNetSegmenter",
     "mask_to_endocardial_contour",
+    "analyze_masks",
+    "masks_to_sequence",
     "analyze_cine",
     "contours_to_sequence",
     "detect_ed_es_from_areas",

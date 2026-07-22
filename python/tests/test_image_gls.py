@@ -17,9 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gls_analysis import (  # noqa: E402
     CineLoop,
     analyze_cine,
+    analyze_masks,
     compute_gls,
     contours_to_sequence,
     detect_ed_es_from_areas,
+    masks_to_sequence,
 )
 
 
@@ -116,6 +118,80 @@ def test_analyze_cine_with_stub_segmenter():
     result = analyze_cine(cine, StubSegmenter())
     assert result.gls_percent < 0
     assert result.geometry == "4CH"
+
+
+def _rasterize_wall(wall, H=96, W=96):
+    import cv2
+    mask = np.zeros((H, W), dtype=np.uint8)
+    pts = wall.copy()
+    pts[:, 0] += 50
+    pts[:, 1] += 48
+    cv2.fillPoly(mask, [pts[:, ::-1].astype(np.int32)], 1)
+    return mask
+
+
+def test_analyze_masks_direct():
+    # The ramireport hand-off: masks straight in, no CineLoop/Segmenter.
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        print("SKIP test_analyze_masks_direct (cv2 not installed)")
+        return
+    scales = [1.0, 0.94, 0.88, 0.85, 0.9, 0.98]
+    masks = [_rasterize_wall(_u_wall(s)) for s in scales]
+    result = analyze_masks(masks, frame_rate=45.0, ed_frame=0, es_frame=3, view="A4C")
+    assert result.gls_percent < 0
+    assert result.metric_name == "GLS"
+    assert result.view == "A4C"
+
+
+def test_analyze_masks_matches_analyze_cine():
+    # analyze_cine(segmenter) should equal analyze_masks on the same masks.
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        print("SKIP test_analyze_masks_matches_analyze_cine (cv2 not installed)")
+        return
+    scales = [1.0, 0.93, 0.86, 0.9, 0.98]
+    masks = [_rasterize_wall(_u_wall(s)) for s in scales]
+
+    class StubSegmenter:
+        def __init__(self):
+            self._i = 0
+
+        def segment(self, frame):
+            m = masks[self._i % len(masks)]
+            self._i += 1
+            return m
+
+    frames = np.zeros((len(masks), 96, 96), dtype=np.float32)
+    cine = CineLoop(frames=frames, frame_rate=45.0, view="A4C", ed_frame=0, es_frame=2)
+    via_cine = analyze_cine(cine, StubSegmenter())
+    via_masks = analyze_masks(masks, 45.0, ed_frame=0, es_frame=2, view="A4C")
+    assert abs(via_cine.gls_percent - via_masks.gls_percent) < 1e-9
+
+
+def test_masks_to_sequence_auto_ed_es():
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        print("SKIP test_masks_to_sequence_auto_ed_es (cv2 not installed)")
+        return
+    # Largest cavity (scale 1.0) at frame 0 -> ED; smallest (0.8) at frame 2 -> ES.
+    scales = [1.0, 0.9, 0.8, 0.9, 1.0]
+    masks = [_rasterize_wall(_u_wall(s)) for s in scales]
+    seq = masks_to_sequence(masks, 50.0)
+    assert seq.reference_frame == 0
+    assert seq.end_systole_frame == 2
+
+
+def test_masks_too_few_raises():
+    try:
+        masks_to_sequence([np.zeros((10, 10))], 50.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for <3 masks")
 
 
 def _main():
