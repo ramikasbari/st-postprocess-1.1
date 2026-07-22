@@ -1,0 +1,145 @@
+# GLS Analysis System (Python)
+
+A pure-Python / NumPy **Global Longitudinal Strain (GLS)** analysis system that
+works directly on this toolkit's real data: ECHOPAC (GE Healthcare) *"store full
+trace"* speckle-tracking `.CSV` exports found in [`../Data`](../Data).
+
+It complements the original MATLAB scripts (`../Code`). The strain math is a
+faithful port of the toolkit's `getSTdataXY.m`, with a numerically-stable global
+strain metric added on top.
+
+> **Scope note.** This module operates on the point-trajectory `.CSV` exports
+> that this repository actually contains. It does **not** ingest DICOM images or
+> perform segmentation/tracking from pixels — the speckle tracking is already
+> done in ECHOPAC and exported as knot trajectories, which is exactly what this
+> code consumes.
+
+## Why a separate global metric?
+
+`getSTdataXY.m` computes a **pointwise** Lagrangian strain in a local
+radial/longitudinal frame (`tmp_f ./ tmp_1`). Near the apex the reference
+longitudinal segment component approaches zero, so that ratio can blow up for
+individual points — a naive spatial mean of the pointwise strain is therefore
+unstable (one sample loop peaks at ‑71% that way).
+
+The headline metric here instead uses the **change in total endocardial wall
+length**:
+
+```
+strain(f) = (L(f) − L(Q1)) / L(Q1) × 100
+```
+
+which is the definition clinical GLS/GCS is built on and is stable across every
+sample loop. The pointwise MATLAB port is still available
+(`compute_local_strain`) for per-point displacement/velocity/strain curves.
+
+## Install
+
+Only NumPy is required. Reading the legacy `.xls` subject registry additionally
+needs `xlrd`.
+
+```bash
+pip install -r python/requirements.txt
+```
+
+## Usage
+
+### Command line
+
+```bash
+cd python
+
+# Process the whole demo registry (DEMO_DATA.xls) under Data/
+python -m gls_analysis.cli --data ../Data
+
+# One CSV with explicit ECG events (Q1 MVC AVO AVC MVO Q2, 0-based frames)
+python -m gls_analysis.cli --csv ../Data/VOL_0001/VOL_0001_OFF_4CH.CSV \
+    --4ch --events 13 14 17 28 31 44
+
+# Machine-readable output
+python -m gls_analysis.cli --data ../Data --json results.json
+```
+
+### Library
+
+```python
+from gls_analysis import parse_csv, compute_gls, assess
+
+seq = parse_csv(
+    "../Data/VOL_0001/VOL_0001_OFF_4CH.CSV",
+    is_4ch=True,
+    ecg_events=[13, 14, 17, 28, 31, 44],  # Q1 MVC AVO AVC MVO Q2, 0-based
+)
+result = compute_gls(seq)
+report = assess(result)
+
+print(result.metric_name, f"{result.gls_percent:.1f}%")   # GLS -14.8%
+print(report.quality_score, report.reportable)             # 95 True
+```
+
+## ECG events
+
+Six frame indices per sequence, in the order used throughout the toolkit:
+
+| # | Event | Meaning                                   |
+|---|-------|-------------------------------------------|
+| 1 | Q1    | onset of QRS / cycle start (reference/ED) |
+| 2 | MVC   | mitral valve closure                      |
+| 3 | AVO   | aortic valve opening                      |
+| 4 | AVC   | aortic valve closure (end-systole)        |
+| 5 | MVO   | mitral valve opening                      |
+| 6 | Q2    | onset of next QRS / cycle end             |
+
+These live in `DEMO_DATA.xls` and are read automatically by the registry path.
+Unlike the MATLAB reader (which adds `+1` for 1-based indexing), the raw
+spreadsheet values are used directly as 0-based Python frame indices.
+
+Peak-systolic strain (the headline `GLS`/`GCS`) is the most negative value
+between **Q1 and MVO**; the end-systolic value is taken at **AVC**.
+
+## Layout
+
+```
+python/
+  gls_analysis/
+    echopac_reader.py   # CSV + DEMO_DATA.xls parsing (ports a1_ReadExportedData.m)
+    strain.py           # local-frame strain (ports getSTdataXY.m) + arc-length strain
+    gls.py              # global + segmental GLS/GCS, phase handling
+    quality.py          # evidence-based QC gates and reference ranges
+    cli.py              # command-line entry point
+  tests/
+    test_gls.py         # runs against the real Data/ samples
+  requirements.txt
+```
+
+## Results on the bundled sample data
+
+| Sequence            | View | FR (Hz) | Metric | Peak systolic | End-systolic |
+|---------------------|------|---------|--------|---------------|--------------|
+| VOL_0001_OFF_4CH    | 4CH  | 52      | GLS    | −14.8%        | −14.0%       |
+| VOL_0002_OFF_4CH    | 4CH  | 70      | GLS    | −11.0%        | −10.3%       |
+| SUB_0014_POST_SAX   | SAX  | 79      | GCS    | −12.1%        | −11.9%       |
+| SUB_0015_POST_SAX   | SAX  | 85      | GCS    | −9.8%         | −9.7%        |
+
+(GCS from a single short-axis endocardial ring is of smaller magnitude than a
+full-model GCS; the QC plausibility band accounts for this.)
+
+## Tests
+
+```bash
+python python/tests/test_gls.py        # no pytest needed
+# or
+python -m pytest python/tests
+```
+
+The suite asserts physiological behaviour on the real samples: correct sign,
+plausible magnitude, numerical stability, a zero-strain reference frame, and
+agreement of the MATLAB port at the reference frame.
+
+## References
+
+- Duchateau N, De Craene M, Piella G, et al. *A spatiotemporal statistical atlas
+  of motion for the quantification of abnormalities in myocardial tissue
+  velocities.* Medical Image Analysis, 2011;15(3):316‑28.
+- Voigt J-U, et al. *Definitions for a common standard for 2D speckle tracking
+  echocardiography.* JASE 2015 (frame-rate and methodology thresholds).
