@@ -25,7 +25,7 @@ from typing import Optional
 
 import numpy as np
 
-from .echopac_reader import STSequence
+from .core import StrainSequence
 
 # 90-degree rotation used to obtain the radial direction from the wall tangent.
 _ROT90 = np.array([[0.0, -1.0], [1.0, 0.0]])
@@ -111,32 +111,31 @@ class LocalStrainResult:
 
 
 def compute_local_strain(
-    seq: STSequence,
+    seq: StrainSequence,
     correct_drift: bool = True,
 ) -> LocalStrainResult:
     """Port of ``getSTdataXY.m`` returning pointwise local-frame quantities.
 
     Args:
-        seq: A parsed :class:`STSequence`. Requires ``ecg_events`` to be set
-            (Q1/Q2 define the reference frame and drift span).
+        seq: A :class:`StrainSequence`. ``reference_frame`` / ``drift_end_frame``
+            define the reference frame and drift span.
         correct_drift: Apply the linear drift correction (recommended, matches
             the MATLAB default ``options.correctDrift = 1``).
 
     Returns:
         A :class:`LocalStrainResult`.
     """
-    if seq.ecg_events is None:
-        raise ValueError("compute_local_strain requires seq.ecg_events (Q1..Q2)")
-
     num_frames, num_cp = seq.num_frames, seq.num_cp
-    events = seq.ecg_events
-    q1, q2 = events[0], events[-1]
+    q1, q2 = seq.reference_frame, seq.drift_end_frame
 
     xy = seq.xy.astype(float)
     if correct_drift:
         xy = apply_drift_correction(xy, q1, q2)
 
-    time_interval = (seq.end_time - seq.begin_time) / (q2 - q1)
+    if seq.begin_time is not None and seq.end_time is not None and q2 != q1:
+        time_interval = (seq.end_time - seq.begin_time) / (q2 - q1)
+    else:
+        time_interval = 1.0 / seq.frame_rate
 
     displacement = np.full((num_frames, num_cp, 2), np.nan)
     velocity = np.full((num_frames, num_cp, 2), np.nan)
@@ -194,27 +193,24 @@ def endocardial_length(xy_f: np.ndarray, is_4ch: bool) -> float:
 
 
 def global_strain_curve(
-    seq: STSequence,
+    seq: StrainSequence,
     correct_drift: bool = True,
 ) -> np.ndarray:
     """Numerically-stable global strain curve over the whole sequence.
 
     Computed as the relative change in total endocardial length with respect to
-    the reference (Q1) frame: ``(L(f) - L(Q1)) / L(Q1) * 100`` for every frame.
+    the reference frame: ``(L(f) - L(ref)) / L(ref) * 100`` for every frame.
     Negative values indicate shortening (the physiological direction in
     systole).
 
     Args:
-        seq: A parsed :class:`STSequence` with ``ecg_events`` set.
+        seq: A :class:`StrainSequence`.
         correct_drift: Apply drift correction before measuring lengths.
 
     Returns:
         ``(num_frames,)`` array of strain in percent.
     """
-    if seq.ecg_events is None:
-        raise ValueError("global_strain_curve requires seq.ecg_events (Q1..Q2)")
-
-    q1, q2 = seq.ecg_events[0], seq.ecg_events[-1]
+    q1, q2 = seq.reference_frame, seq.drift_end_frame
     xy = seq.xy.astype(float)
     if correct_drift:
         xy = apply_drift_correction(xy, q1, q2)

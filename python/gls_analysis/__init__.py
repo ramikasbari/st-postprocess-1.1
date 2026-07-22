@@ -2,46 +2,37 @@
 gls_analysis
 ============
 
-A pure-Python/NumPy GLS (Global Longitudinal Strain) analysis system for the
-speckle-tracking post-processing toolkit, operating on ECHOPAC "store full
-trace" ``.CSV`` exports.
+A source-agnostic strain (GLS / GCS) analysis library. The core operates on a
+vendor-neutral :class:`StrainSequence` — tracked myocardial points over time —
+so it can be embedded in any program. Input adapters (ECHOPAC CSV, DICOM image
+segmentation) are optional and independent of the core.
 
-Pipeline::
+Minimal, source-independent usage::
 
-    from gls_analysis import parse_csv, compute_gls, assess
+    from gls_analysis import StrainSequence, compute_gls, assess
 
-    seq = parse_csv("Data/VOL_0001/VOL_0001_OFF_4CH.CSV",
-                    is_4ch=True, ecg_events=[13, 14, 17, 28, 31, 44])
+    seq = StrainSequence.from_points(
+        points,               # (num_frames, num_points, 2)
+        frame_rate=50.0,
+        topology="open",      # "open" = longitudinal, "closed" = circumferential
+        reference_frame=0,    # end-diastole
+        end_systole_frame=12,
+    )
     result = compute_gls(seq)
     report = assess(result)
-    print(result.metric_name, result.gls_percent)
+    print(result.metric_name, result.gls_percent)   # e.g. GLS -18.3
 
-The strain math is a faithful port of the toolkit's MATLAB ``getSTdataXY.m``
-(see :mod:`gls_analysis.strain`), with a numerically-stable global strain built
-on endocardial-length change.
+Optional input adapters:
+
+* :func:`parse_csv` / :func:`read_registry` — ECHOPAC "store full trace" CSV.
+* :func:`analyze_cine` (+ :class:`CineLoop`, :class:`EchoNetSegmenter`) — the
+  DICOM/image path: segment each frame, extract the wall, then feed the same core.
 """
 
-from .cine import CineLoop
-from .echopac_reader import (
-    ECG_EVENT_NAMES,
-    STSequence,
-    SubjectEntry,
-    load_sequence,
-    parse_csv,
-    read_registry,
-)
+# --- vendor-neutral core (the public heart of the library) --------------- #
+from .core import CLOSED, OPEN, StrainSequence
 from .gls import GLSResult, SegmentStrain, compute_gls
-from .image_gls import (
-    analyze_cine,
-    contours_to_sequence,
-    detect_ed_es_from_areas,
-)
 from .quality import QCReport, assess
-from .segmentation import (
-    EchoNetSegmenter,
-    Segmenter,
-    mask_to_endocardial_contour,
-)
 from .strain import (
     LocalStrainResult,
     compute_local_strain,
@@ -49,24 +40,49 @@ from .strain import (
     global_strain_curve,
 )
 
+# --- optional input adapters --------------------------------------------- #
+from .cine import CineLoop
+from .echopac_reader import (
+    ECG_EVENT_NAMES,
+    STSequence,  # backward-compatible alias of StrainSequence
+    SubjectEntry,
+    load_sequence,
+    parse_csv,
+    read_registry,
+)
+from .image_gls import (
+    analyze_cine,
+    contours_to_sequence,
+    detect_ed_es_from_areas,
+)
+from .segmentation import (
+    EchoNetSegmenter,
+    Segmenter,
+    mask_to_endocardial_contour,
+)
+
 __all__ = [
-    # CSV / ECHOPAC path
-    "ECG_EVENT_NAMES",
-    "STSequence",
-    "SubjectEntry",
-    "parse_csv",
-    "read_registry",
-    "load_sequence",
-    "compute_local_strain",
-    "LocalStrainResult",
-    "global_strain_curve",
-    "endocardial_length",
+    # Neutral core
+    "StrainSequence",
+    "OPEN",
+    "CLOSED",
     "compute_gls",
     "GLSResult",
     "SegmentStrain",
     "assess",
     "QCReport",
-    # Image (DICOM) path
+    "global_strain_curve",
+    "endocardial_length",
+    "compute_local_strain",
+    "LocalStrainResult",
+    # ECHOPAC adapter
+    "parse_csv",
+    "read_registry",
+    "load_sequence",
+    "SubjectEntry",
+    "ECG_EVENT_NAMES",
+    "STSequence",
+    # Image (DICOM) adapter
     "CineLoop",
     "Segmenter",
     "EchoNetSegmenter",
@@ -76,4 +92,4 @@ __all__ = [
     "detect_ed_es_from_areas",
 ]
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

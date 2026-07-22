@@ -18,17 +18,19 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from .echopac_reader import STSequence
+from .core import CLOSED, OPEN, StrainSequence
 from .strain import (
     apply_drift_correction,
     endocardial_length,
     global_strain_curve,
 )
 
-# Wall-segment labels, in tracing order (basal-septal first for 4CH per the
-# README protocol; anteroseptal first for SAX).
+# Wall-segment labels, in tracing order, keyed by topology. Open (apical/
+# longitudinal) walls default to a basal-septal-first apical-view convention;
+# closed (short-axis/circumferential) rings to an anteroseptal-first convention.
+# These are display labels only and can be overridden by the caller.
 SEGMENT_LABELS: Dict[str, List[str]] = {
-    "4CH": [
+    OPEN: [
         "basal septal",
         "mid septal",
         "apical septal",
@@ -36,7 +38,7 @@ SEGMENT_LABELS: Dict[str, List[str]] = {
         "mid lateral",
         "basal lateral",
     ],
-    "SAX": [
+    CLOSED: [
         "anteroseptal",
         "inferoseptal",
         "inferior",
@@ -62,26 +64,34 @@ class GLSResult:
     """Complete global/segmental strain result for one sequence."""
 
     name: str
-    geometry: str                 # '4CH' or 'SAX'
+    topology: str                 # 'open' or 'closed'
     strain_kind: str              # 'longitudinal' or 'circumferential'
     frame_rate: float
     num_frames: int
     gls_percent: float            # peak-systolic global strain (headline metric)
-    end_systolic_percent: float   # global strain at aortic valve closure
+    end_systolic_percent: float   # global strain at end-systole
     peak_frame: int               # frame index of the peak-systolic value
     curve_percent: np.ndarray     # (num_frames,) full global strain curve
     segments: List[SegmentStrain] = field(default_factory=list)
     ecg_events: Optional[List[int]] = None
+    view: Optional[str] = None    # optional acquisition-view label, e.g. 'A4C'
 
     @property
     def metric_name(self) -> str:
-        return "GLS" if self.geometry == "4CH" else "GCS"
+        """'GLS' for longitudinal strain, 'GCS' for circumferential."""
+        return "GLS" if self.strain_kind == "longitudinal" else "GCS"
+
+    @property
+    def geometry(self) -> str:
+        """Legacy display label: '4CH' (open) or 'SAX' (closed)."""
+        return "4CH" if self.topology == OPEN else "SAX"
 
     def as_dict(self) -> Dict:
         """JSON-serialisable summary (drops the full curve array)."""
         return {
             "name": self.name,
-            "geometry": self.geometry,
+            "topology": self.topology,
+            "view": self.view,
             "metric": self.metric_name,
             "strain_kind": self.strain_kind,
             "frame_rate": self.frame_rate,
@@ -101,38 +111,30 @@ class GLSResult:
         }
 
 
-def _systolic_window(seq: STSequence) -> tuple[int, int]:
+def _systolic_window(seq: StrainSequence) -> tuple[int, int]:
     """Frame range [start, end] to search for the peak systolic value.
 
-    Uses Q1 (cycle start) to MVO (mitral valve opening) when ECG events are
-    available; otherwise brackets the exporter's ES-time marker.
+    Runs from the reference (end-diastole) frame to the end of the systolic
+    search window (mitral-valve opening, or end-systole if not specified).
     """
-    if seq.ecg_events is not None:
-        q1, mvo = seq.ecg_events[0], seq.ecg_events[4]
-        return q1, max(q1 + 1, mvo)
-    # Fallback: use the ES-time marker relative to the left marker.
-    es_frame = int(round((seq.es_time - seq.begin_time) * seq.frame_rate))
-    es_frame = int(np.clip(es_frame, 1, seq.num_frames - 1))
-    return 0, es_frame
+    q1, end = seq.reference_frame, seq.systole_search_end
+    return q1, max(q1 + 1, end)
 
 
-def _end_systole_frame(seq: STSequence) -> int:
-    """Frame index of end-systole (aortic valve closure, or ES-time fallback)."""
-    if seq.ecg_events is not None:
-        return seq.ecg_events[3]  # AVC
-    es_frame = int(round((seq.es_time - seq.begin_time) * seq.frame_rate))
-    return int(np.clip(es_frame, 0, seq.num_frames - 1))
+def _end_systole_frame(seq: StrainSequence) -> int:
+    """Frame index of end-systole."""
+    return seq.end_systole_frame
 
 
-def _segment_curves(seq: STSequence, n_segments: int, correct_drift: bool) -> np.ndarray:
+def _segment_curves(seq: StrainSequence, n_segments: int, correct_drift: bool) -> np.ndarray:
     """Per-segment strain curves via arc length, shape ``(n_segments, num_frames)``.
 
     The wall is partitioned into ``n_segments`` contiguous pieces of equal
-    reference (Q1) arc length. Each piece's length change over the cycle gives a
+    reference arc length. Each piece's length change over the cycle gives a
     regional strain curve.
     """
-    q1 = seq.ecg_events[0] if seq.ecg_events is not None else 0
-    q2 = seq.ecg_events[-1] if seq.ecg_events is not None else seq.num_frames - 1
+    q1 = seq.reference_frame
+    q2 = seq.drift_end_frame
     xy = seq.xy.astype(float)
     if correct_drift:
         xy = apply_drift_correction(xy, q1, q2)
@@ -171,17 +173,20 @@ def endocardial_length_open(points: np.ndarray) -> float:
 
 
 def compute_gls(
-    seq: STSequence,
+    seq: StrainSequence,
     n_segments: int = 6,
     correct_drift: bool = True,
+    segment_labels: Optional[List[str]] = None,
 ) -> GLSResult:
     """Compute global and segmental strain for one sequence.
 
     Args:
-        seq: A parsed :class:`STSequence`.
+        seq: A :class:`StrainSequence` (from any source).
         n_segments: Number of wall segments for the regional breakdown
-            (6 by convention for a single apical or short-axis view).
+            (6 by convention for a single view).
         correct_drift: Apply drift correction before measuring lengths.
+        segment_labels: Optional custom labels for the segments; defaults to a
+            topology-appropriate convention.
 
     Returns:
         A populated :class:`GLSResult`. The headline ``gls_percent`` is the
@@ -198,7 +203,9 @@ def compute_gls(
     es_frame = _end_systole_frame(seq)
     end_systolic = float(curve[es_frame])
 
-    labels = SEGMENT_LABELS.get(seq.geometry, [f"segment {i+1}" for i in range(n_segments)])
+    labels = segment_labels or SEGMENT_LABELS.get(
+        seq.topology, [f"segment {i + 1}" for i in range(n_segments)]
+    )
     seg_curves = _segment_curves(seq, n_segments, correct_drift)
     segments: List[SegmentStrain] = []
     for s in range(n_segments):
@@ -220,7 +227,7 @@ def compute_gls(
 
     return GLSResult(
         name=seq.name,
-        geometry=seq.geometry,
+        topology=seq.topology,
         strain_kind=seq.strain_kind,
         frame_rate=seq.frame_rate,
         num_frames=seq.num_frames,
@@ -230,4 +237,5 @@ def compute_gls(
         curve_percent=curve,
         segments=segments,
         ecg_events=seq.ecg_events,
+        view=seq.metadata.get("view"),
     )

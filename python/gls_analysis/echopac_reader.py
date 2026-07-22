@@ -25,6 +25,8 @@ from typing import List, Optional
 
 import numpy as np
 
+from .core import CLOSED, OPEN, StrainSequence
+
 # Six ECG events expected per sequence (see README, Recommendation C.2):
 # Q1  = onset of QRS / start of cycle (reference / end-diastole)
 # MVC = mitral valve closure
@@ -45,32 +47,10 @@ _HEADER_RE = re.compile(
 _KNOTS_RE = re.compile(r"Num Frames:\s*Knots:[^\d]*([0-9]+)\s+([0-9]+)")
 
 
-@dataclass
-class STSequence:
-    """A single parsed speckle-tracking sequence."""
-
-    name: str
-    is_4ch: bool
-    flip: bool
-    frame_rate: float                 # Hz
-    begin_time: float                 # s (left marker)
-    end_time: float                   # s (right marker)
-    es_time: float                    # s (end-systole marker from the exporter)
-    num_frames: int
-    num_cp: int                       # effective control points (SAX already trimmed)
-    xy: np.ndarray                    # (num_frames, num_cp, 2), millimetres
-    ecg_events: Optional[List[int]] = None  # 0-based frame indices, len == 6
-    source_path: Optional[str] = None
-
-    @property
-    def geometry(self) -> str:
-        """'4CH' (open longitudinal wall) or 'SAX' (closed circumferential ring)."""
-        return "4CH" if self.is_4ch else "SAX"
-
-    @property
-    def strain_kind(self) -> str:
-        """Physiological strain measured by this geometry."""
-        return "longitudinal" if self.is_4ch else "circumferential"
+# ``STSequence`` used to be defined here; it is now the vendor-neutral
+# :class:`~gls_analysis.core.StrainSequence`. The alias is kept so existing
+# imports (``from gls_analysis.echopac_reader import STSequence``) keep working.
+STSequence = StrainSequence
 
 
 def parse_csv(
@@ -79,8 +59,8 @@ def parse_csv(
     flip: bool = False,
     ecg_events: Optional[List[int]] = None,
     name: Optional[str] = None,
-) -> STSequence:
-    """Parse one ECHOPAC ``.CSV`` export into an :class:`STSequence`.
+) -> StrainSequence:
+    """Parse one ECHOPAC ``.CSV`` export into a :class:`StrainSequence`.
 
     Args:
         path: Path to the ``.CSV`` file.
@@ -94,7 +74,7 @@ def parse_csv(
         name: Optional human-readable label; defaults to the file stem.
 
     Returns:
-        A populated :class:`STSequence`.
+        A populated :class:`StrainSequence`.
 
     Raises:
         ValueError: If the header, knot counts, or coordinate block cannot be
@@ -132,18 +112,18 @@ def parse_csv(
     if ecg_events is not None:
         ecg_events = _validate_events(list(ecg_events), num_frames, path)
 
-    return STSequence(
-        name=name or path.stem,
-        is_4ch=bool(is_4ch),
-        flip=bool(flip),
+    topology = OPEN if is_4ch else CLOSED
+    return StrainSequence(
+        points=xy,
         frame_rate=frame_rate,
+        topology=topology,
+        events=ecg_events,
+        name=name or path.stem,
+        flip=bool(flip),
         begin_time=begin_time,
         end_time=end_time,
         es_time=es_time,
-        num_frames=num_frames,
-        num_cp=num_cp,
-        xy=xy,
-        ecg_events=ecg_events,
+        metadata={"vendor": "ECHOPAC", "view": ("4CH" if is_4ch else "SAX")},
         source_path=str(path),
     )
 
@@ -234,7 +214,7 @@ def read_registry(xls_path: str | Path) -> List[SubjectEntry]:
     return entries
 
 
-def load_sequence(data_root: str | Path, entry: SubjectEntry) -> STSequence:
+def load_sequence(data_root: str | Path, entry: SubjectEntry) -> StrainSequence:
     """Load the CSV referenced by a registry entry, wiring in its ECG events."""
     data_root = Path(data_root)
     csv_path = data_root / entry.folder_name / entry.csv_name

@@ -1,18 +1,38 @@
-# GLS Analysis System (Python)
+# Strain Analysis Library (Python)
 
-A pure-Python / NumPy **Global Longitudinal Strain (GLS)** analysis system that
-works directly on this toolkit's real data: ECHOPAC (GE Healthcare) *"store full
-trace"* speckle-tracking `.CSV` exports found in [`../Data`](../Data).
+A pure-Python / NumPy **strain (GLS / GCS)** analysis library. It is
+**source-agnostic**: the core works on a vendor-neutral `StrainSequence`
+(tracked myocardial points over time), so it drops into any program. Reading
+ECHOPAC CSV or running a DICOM segmentation model are **optional adapters**, not
+part of the core.
 
-It complements the original MATLAB scripts (`../Code`). The strain math is a
-faithful port of the toolkit's `getSTdataXY.m`, with a numerically-stable global
-strain metric added on top.
+The strain math is a faithful port of this toolkit's MATLAB `getSTdataXY.m`
+(`../Code`), with a numerically-stable global metric added on top.
 
-> **Scope note.** This module operates on the point-trajectory `.CSV` exports
-> that this repository actually contains. It does **not** ingest DICOM images or
-> perform segmentation/tracking from pixels — the speckle tracking is already
-> done in ECHOPAC and exported as knot trajectories, which is exactly what this
-> code consumes.
+## The neutral core (embed this)
+
+Everything flows through one type. Build it from raw points — no ECHOPAC, no
+DICOM, no view jargon required:
+
+```python
+from gls_analysis import StrainSequence, compute_gls, assess
+
+seq = StrainSequence.from_points(
+    points,               # (num_frames, num_points, 2) — your tracked contour
+    frame_rate=50.0,
+    topology="open",      # "open" = longitudinal wall, "closed" = circumferential ring
+    reference_frame=0,    # end-diastole (strain reference)
+    end_systole_frame=12, # end-systole
+)
+result = compute_gls(seq)          # -> GLSResult
+report = assess(result)            # -> QCReport
+print(result.metric_name, result.gls_percent)   # "GLS" -18.3
+```
+
+`topology="open"` yields **GLS** (longitudinal); `"closed"` yields **GCS**
+(circumferential). `result.as_dict()` is JSON-serialisable for reporting. That
+is the entire contract your program needs — the sections below are just adapters
+that construct a `StrainSequence` for you.
 
 ## Why a separate global metric?
 
@@ -42,25 +62,10 @@ needs `xlrd`.
 pip install -r python/requirements.txt
 ```
 
-## Usage
+## Adapter 1 — ECHOPAC CSV
 
-### Command line
-
-```bash
-cd python
-
-# Process the whole demo registry (DEMO_DATA.xls) under Data/
-python -m gls_analysis.cli --data ../Data
-
-# One CSV with explicit ECG events (Q1 MVC AVO AVC MVO Q2, 0-based frames)
-python -m gls_analysis.cli --csv ../Data/VOL_0001/VOL_0001_OFF_4CH.CSV \
-    --4ch --events 13 14 17 28 31 44
-
-# Machine-readable output
-python -m gls_analysis.cli --data ../Data --json results.json
-```
-
-### Library
+An input adapter that parses ECHOPAC "store full trace" exports into a
+`StrainSequence`:
 
 ```python
 from gls_analysis import parse_csv, compute_gls, assess
@@ -70,11 +75,18 @@ seq = parse_csv(
     is_4ch=True,
     ecg_events=[13, 14, 17, 28, 31, 44],  # Q1 MVC AVO AVC MVO Q2, 0-based
 )
-result = compute_gls(seq)
-report = assess(result)
-
+result = compute_gls(seq)                 # same core as the neutral example
 print(result.metric_name, f"{result.gls_percent:.1f}%")   # GLS -14.8%
-print(report.quality_score, report.reportable)             # 95 True
+```
+
+Command line (for this repo's bundled data):
+
+```bash
+cd python
+python -m gls_analysis.cli --data ../Data                 # whole DEMO_DATA.xls registry
+python -m gls_analysis.cli --csv ../Data/VOL_0001/VOL_0001_OFF_4CH.CSV \
+    --4ch --events 13 14 17 28 31 44                       # one CSV
+python -m gls_analysis.cli --data ../Data --json out.json  # machine-readable
 ```
 
 ## ECG events
@@ -97,18 +109,11 @@ spreadsheet values are used directly as 0-based Python frame indices.
 Peak-systolic strain (the headline `GLS`/`GCS`) is the most negative value
 between **Q1 and MVO**; the end-systolic value is taken at **AVC**.
 
-## Two input paths
+## Adapter 2 — DICOM images
 
-This package supports two sources of myocardial motion:
-
-1. **ECHOPAC `.CSV` exports** (the repo's real data) — speckle tracking already
-   done; points handed in. Fully validated. *This is the primary path.*
-2. **DICOM cine images** (`gls_analysis.image_gls`) — pixels in, strain out, via
-   a segmentation model. This is a **scaffold**: the strain core is validated,
-   but the model + mask→contour heuristic that feed it are **not** — treat any
-   number from this path as a research baseline, not a clinical measurement.
-
-### Image (DICOM) path
+Pixels in, strain out, via a segmentation model. The strain core is validated,
+but the model + mask→contour heuristic that feed it are **not** — treat any
+number from this path as a research baseline, not a clinical measurement.
 
 You bring the DICOM reader and the model; this package supplies the boundary
 interfaces and the validated strain core in between:
@@ -158,19 +163,25 @@ Optional deps for this path only: `opencv-python` (mask→contour) and
 ```
 python/
   gls_analysis/
-    echopac_reader.py   # CSV + DEMO_DATA.xls parsing (ports a1_ReadExportedData.m)
+    core.py             # StrainSequence — the vendor-neutral core type (embed this)
     strain.py           # local-frame strain (ports getSTdataXY.m) + arc-length strain
     gls.py              # global + segmental GLS/GCS, phase handling
     quality.py          # evidence-based QC gates and reference ranges
-    cli.py              # command-line entry point
-    cine.py             # CineLoop: the DICOM-reader seam (image path)
-    segmentation.py     # Segmenter protocol, EchoNet adapter, mask->contour
-    image_gls.py        # cine -> per-frame contours -> validated strain core
+    echopac_reader.py   # ADAPTER: ECHOPAC CSV + DEMO_DATA.xls (ports a1_ReadExportedData.m)
+    cine.py             # ADAPTER: CineLoop, the DICOM-reader seam
+    segmentation.py     # ADAPTER: Segmenter protocol, EchoNet, mask->contour
+    image_gls.py        # ADAPTER: cine -> per-frame contours -> core
+    cli.py              # command-line entry point (ECHOPAC data)
   tests/
-    test_gls.py         # CSV path, runs against the real Data/ samples
+    test_core.py        # neutral core, no adapters imported
+    test_gls.py         # ECHOPAC path, runs against the real Data/ samples
     test_image_gls.py   # image glue, synthetic contours (numpy-only core)
   requirements.txt
 ```
+
+Dependency layers: `core.py` + `strain.py` + `gls.py` + `quality.py` need only
+**NumPy**. Each adapter adds its own optional deps (`xlrd` for the registry,
+`opencv`/`torch` for the image path) and nothing in the core imports them.
 
 ## Results on the bundled sample data
 

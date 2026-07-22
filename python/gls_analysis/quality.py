@@ -106,7 +106,7 @@ def assess(result: GLSResult) -> QCReport:
 
     # 2. Physiological plausibility of the global value.
     gls = result.gls_percent
-    if result.geometry == "4CH":
+    if result.strain_kind == "longitudinal":
         upper, lower, label = GLS_NORMAL_UPPER, GLS_NORMAL_LOWER, "GLS"
     else:
         upper, lower, label = GCS_NORMAL_UPPER, GCS_NORMAL_LOWER, "GCS"
